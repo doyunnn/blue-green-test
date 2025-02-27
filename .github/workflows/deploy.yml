@@ -1,0 +1,46 @@
+name: Deploy to AWS ECS (Blue/Green)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to AWS ECS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Login to AWS ECR
+        run: |
+          aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URL }}
+
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t ${{ secrets.AWS_ECR_URL }}/my-nextjs-app:latest .
+          docker push ${{ secrets.AWS_ECR_URL }}/my-nextjs-app:latest
+
+      - name: Register New Task Definition
+        id: register-task
+        run: |
+          TASK_DEF=$(aws ecs register-task-definition \
+            --family my-nextjs-task \
+            --execution-role-arn arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole \
+            --network-mode awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu 256 --memory 512 \
+            --container-definitions '[{"name":"my-nextjs-container","image":"'"${{ secrets.AWS_ECR_URL }}/my-nextjs-app:latest"'","portMappings":[{"containerPort":3000}]}]' \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "TASK_DEF_ARN=$TASK_DEF" >> $GITHUB_ENV
+
+      - name: Deploy to ECS via CodeDeploy
+        run: |
+          aws deploy create-deployment \
+            --application-name my-nextjs-app \
+            --deployment-group-name my-nextjs-deployment-group \
+            --deployment-config-name CodeDeployDefault.ECSAllAtOnce \
+            --revision revisionType=AppSpecContent,appSpecContent={"content":"$(cat appspec.yml | base64)"} \
+            --task-definition $TASK_DEF_ARN
